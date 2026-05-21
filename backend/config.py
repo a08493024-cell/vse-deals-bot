@@ -14,3 +14,7 @@ _raw_allowed = os.getenv("ALLOWED_USERS", "")
 ALLOWED_USERS: set[int] = {
     int(uid.strip()) for uid in _raw_allowed.split(",") if uid.strip().isdigit()
 }
+
+# Прокси для локальной разработки (на сервере не нужен)
+# Примеры: socks5://127.0.0.1:1080  или  http://127.0.0.1:8080
+PROXY_URL: str = os.getenv("PROXY_URL", "")

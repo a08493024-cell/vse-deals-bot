@@ -7,6 +7,8 @@ from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
 
+from .config import PROXY_URL
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.vseinstrumenti.ru"
@@ -215,7 +217,8 @@ async def fetch_deals() -> list[dict]:
     logger.info("Запуск парсера vseinstrumenti.ru")
     all_products: list[Product] = []
 
-    async with httpx.AsyncClient(follow_redirects=True, http2=False) as client:
+    proxy = PROXY_URL if PROXY_URL else None
+    async with httpx.AsyncClient(follow_redirects=True, http2=False, proxy=proxy) as client:
         # Прогрев сессии через главную страницу
         await _warmup(client)
 

@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardButton,
@@ -12,7 +13,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from .config import ALLOWED_USERS, APP_URL, TELEGRAM_BOT_TOKEN
+from .config import ALLOWED_USERS, APP_URL, PROXY_URL, TELEGRAM_BOT_TOKEN
 from .parser import ParseError, fetch_deals
 from . import ai_analyzer
 
@@ -35,6 +36,12 @@ async def _deny(message: Message) -> None:
 
 
 # ─── Клавиатура ───
+
+def _make_bot() -> Bot:
+    """Создаёт экземпляр Bot с прокси если задан PROXY_URL."""
+    session = AiohttpSession(proxy=PROXY_URL) if PROXY_URL else None
+    return Bot(token=TELEGRAM_BOT_TOKEN, session=session)
+
 
 def _webapp_keyboard(label: str = "🔥 Открыть все акции") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
@@ -110,7 +117,7 @@ async def run_parse_and_notify() -> dict:
         logger.warning("Рассылка пропущена: токен или список пользователей не заданы")
         return result
 
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = _make_bot()
     sent = 0
     for uid in ALLOWED_USERS:
         try:
@@ -191,7 +198,7 @@ async def start_polling() -> None:
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN не задан — бот не запущен")
         return
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = _make_bot()
     dp = create_dispatcher()
     logger.info("Бот запущен. Белый список: %d пользователей", len(ALLOWED_USERS))
     await dp.start_polling(bot)
