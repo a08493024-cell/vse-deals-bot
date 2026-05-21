@@ -12,9 +12,21 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.vseinstrumenti.ru"
 SALES_URL = f"{BASE_URL}/sales/"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Cache-Control": "max-age=0",
+    "Referer": "https://www.google.ru/",
 }
 
 
@@ -167,8 +179,18 @@ def _parse_page(html: str, page_num: int) -> list[Product]:
     return products
 
 
+async def _warmup(client: httpx.AsyncClient) -> None:
+    """Заходит на главную страницу чтобы получить cookies и не выглядеть как бот."""
+    try:
+        await client.get(BASE_URL, headers=HEADERS, timeout=15.0, follow_redirects=True)
+        await asyncio.sleep(2)
+    except Exception:
+        pass
+
+
 async def _fetch_page(client: httpx.AsyncClient, page: int) -> str:
     """Загружает одну страницу с повторными попытками."""
+    import random
     params = {"page": page} if page > 1 else {}
     last_exc: Optional[Exception] = None
     for attempt in range(1, 4):
@@ -180,7 +202,7 @@ async def _fetch_page(client: httpx.AsyncClient, page: int) -> str:
             last_exc = exc
             logger.warning("Страница %d, попытка %d/3 — ошибка: %s", page, attempt, exc)
             if attempt < 3:
-                await asyncio.sleep(10)
+                await asyncio.sleep(10 + random.uniform(1, 5))
     raise last_exc  # type: ignore[misc]
 
 
@@ -189,17 +211,21 @@ async def fetch_deals() -> list[dict]:
     Главная функция: парсит страницы 1-5, фильтрует скидки ≥50%,
     сортирует и возвращает топ-10 в виде списка словарей.
     """
+    import random
     logger.info("Запуск парсера vseinstrumenti.ru")
     all_products: list[Product] = []
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True, http2=False) as client:
+        # Прогрев сессии через главную страницу
+        await _warmup(client)
+
         for page_num in range(1, 6):
             try:
                 html = await _fetch_page(client, page_num)
                 products = _parse_page(html, page_num)
                 all_products.extend(products)
                 logger.info("Страница %d: +%d товаров (итого %d)", page_num, len(products), len(all_products))
-                await asyncio.sleep(1)  # вежливая задержка между запросами
+                await asyncio.sleep(random.uniform(2, 4))  # случайная задержка
             except Exception as exc:
                 logger.warning("Не удалось загрузить страницу %d: %s", page_num, exc)
 
