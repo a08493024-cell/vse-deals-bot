@@ -1,7 +1,7 @@
 services:
   - type: web
     name: vse-deals-bot
-    env: python
+    env: docker
     dockerfilePath: ./Dockerfile
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -13,4 +13,6 @@ services:
       - key: REFRESH_SECRET
         sync: false
       - key: APP_URL
+        sync: false
+      - key: ALLOWED_USERS
         sync: false
