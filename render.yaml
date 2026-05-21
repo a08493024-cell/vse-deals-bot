@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: vse-deals-bot
+    env: python
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: REFRESH_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false

@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Горячие акции ВсеИнструменты</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --card: #16213e;
+      --accent: #e94560;
+      --accent2: #0f3460;
+      --text: #eaeaea;
+      --muted: #888;
+      --green: #4caf50;
+      --yellow: #ffb300;
+      --red: #e94560;
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+      padding-bottom: 24px;
+    }
+
+    /* ─── Шапка ─── */
+    .header {
+      background: var(--accent2);
+      padding: 14px 16px 10px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .header-sub {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+    .updated-at {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .btn-refresh {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 20px;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 3px 10px;
+      transition: background 0.2s;
+    }
+    .btn-refresh:active { background: rgba(255,255,255,0.1); }
+
+    /* ─── Список ─── */
+    .deals-list {
+      padding: 12px 12px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* ─── Карточка ─── */
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+    .card-top {
+      display: flex;
+      gap: 12px;
+      padding: 12px 12px 8px;
+    }
+    .card-img {
+      width: 80px;
+      height: 80px;
+      object-fit: contain;
+      border-radius: 8px;
+      background: #0d1728;
+      flex-shrink: 0;
+    }
+    .card-img-placeholder {
+      width: 80px;
+      height: 80px;
+      background: #0d1728;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      flex-shrink: 0;
+    }
+    .card-info { flex: 1; min-width: 0; }
+    .card-rank {
+      font-size: 11px;
+      color: var(--accent);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 3px;
+    }
+    .card-name {
+      font-size: 14px;
+      font-weight: 600;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      margin-bottom: 6px;
+    }
+    .price-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .price-old {
+      text-decoration: line-through;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .price-new {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .discount-badge {
+      background: var(--accent);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .rating-row {
+      margin-top: 5px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* ─── Аккордеон ИИ ─── */
+    .ai-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      cursor: pointer;
+      border-top: 1px solid rgba(255,255,255,0.05);
+      font-size: 13px;
+      color: #a0aec0;
+      user-select: none;
+    }
+    .ai-toggle:active { background: rgba(255,255,255,0.03); }
+    .ai-toggle-arrow {
+      font-size: 10px;
+      transition: transform 0.2s;
+    }
+    .ai-toggle-arrow.open { transform: rotate(180deg); }
+
+    .ai-block {
+      display: none;
+      padding: 10px 12px 12px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+      animation: fadeIn 0.15s ease;
+    }
+    .ai-block.open { display: block; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+    .ai-rec {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .ai-rec.take { background: rgba(76,175,80,0.15); color: var(--green); border: 1px solid rgba(76,175,80,0.3); }
+    .ai-rec.think { background: rgba(255,179,0,0.15); color: var(--yellow); border: 1px solid rgba(255,179,0,0.3); }
+    .ai-rec.skip { background: rgba(233,69,96,0.15); color: var(--red); border: 1px solid rgba(233,69,96,0.3); }
+    .ai-rec.unknown { background: rgba(136,136,136,0.15); color: var(--muted); border: 1px solid rgba(136,136,136,0.3); }
+
+    .ai-rows { display: flex; flex-direction: column; gap: 4px; }
+    .ai-row { font-size: 13px; }
+    .ai-row span { color: var(--muted); }
+    .ai-reasoning {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #b0b8c8;
+      font-style: italic;
+      line-height: 1.4;
+    }
+
+    /* ─── Кнопка товара ─── */
+    .btn-product {
+      display: block;
+      margin: 10px 12px 12px;
+      background: var(--accent2);
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 9px;
+      text-align: center;
+      width: calc(100% - 24px);
+      transition: background 0.2s;
+    }
+    .btn-product:active { background: #0a2a50; }
+
+    /* ─── Скелетон ─── */
+    .skeleton { background: var(--card); border-radius: var(--radius); padding: 14px; }
+    .skel-line {
+      background: linear-gradient(90deg, #1e2d4a 25%, #253555 50%, #1e2d4a 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 6px;
+    }
+    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+    .skel-img { width: 80px; height: 80px; border-radius: 8px; }
+    .skel-h { height: 14px; margin-bottom: 8px; }
+    .skel-sm { height: 10px; margin-bottom: 6px; width: 60%; }
+
+    /* ─── Пустое состояние / ошибка ─── */
+    .state-msg {
+      text-align: center;
+      padding: 60px 24px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+    .state-msg .icon { font-size: 48px; display: block; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🔥 Горячие акции ВсеИнструменты</h1>
+  <div class="header-sub">
+    <span class="updated-at" id="updatedAt">Загрузка...</span>
+    <button class="btn-refresh" id="btnRefresh">🔄 Обновить</button>
+  </div>
+</div>
+
+<div class="deals-list" id="dealsList"></div>
+
+<script>
+  // Инициализация Telegram WebApp
+  const tg = window.Telegram?.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+  }
+
+  const list = document.getElementById("dealsList");
+  const updatedAt = document.getElementById("updatedAt");
+  const btnRefresh = document.getElementById("btnRefresh");
+
+  // ─── Утилиты ───
+
+  function fmtPrice(n) {
+    return Number(n).toLocaleString("ru-RU") + " ₽";
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "нет данных";
+    const d = new Date(iso);
+    return d.toLocaleDateString("ru-RU") + " " + d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function demandIcon(d) {
+    if (d === "высокий") return "🔥";
+    if (d === "средний") return "📊";
+    if (d === "низкий") return "❄️";
+    return "❓";
+  }
+
+  function recClass(r) {
+    if (r === "брать") return "take";
+    if (r === "подумать") return "think";
+    if (r === "пропустить") return "skip";
+    return "unknown";
+  }
+
+  function recLabel(r) {
+    if (r === "брать") return "✅ БРАТЬ";
+    if (r === "подумать") return "⚠️ ПОДУМАТЬ";
+    if (r === "пропустить") return "❌ ПРОПУСТИТЬ";
+    return "❓ НЕТ ДАННЫХ";
+  }
+
+  // ─── Скелетон ───
+
+  function renderSkeleton() {
+    list.innerHTML = "";
+    for (let i = 0; i < 3; i++) {
+      const el = document.createElement("div");
+      el.className = "skeleton";
+      el.innerHTML = `
+        <div style="display:flex;gap:12px">
+          <div class="skel-line skel-img"></div>
+          <div style="flex:1">
+            <div class="skel-line skel-h"></div>
+            <div class="skel-line skel-h" style="width:80%"></div>
+            <div class="skel-line skel-sm"></div>
+          </div>
+        </div>`;
+      list.appendChild(el);
+    }
+    updatedAt.textContent = "Загрузка...";
+  }
+
+  // ─── Карточка ───
+
+  function buildCard(deal) {
+    const ai = deal.ai || {};
+    const rec = ai.recommendation || "нет данных";
+    const demand = ai.demand || "неизвестно";
+
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const imgHtml = deal.image_url
+      ? `<img class="card-img" src="${deal.image_url}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+        + `<div class="card-img-placeholder" style="display:none">🔧</div>`
+      : `<div class="card-img-placeholder">🔧</div>`;
+
+    const ratingHtml = deal.rating
+      ? `<div class="rating-row">⭐ ${deal.rating}${deal.reviews_count ? ` (${deal.reviews_count} отзывов)` : ""}</div>`
+      : "";
+
+    const aiHtml = `
+      <div class="ai-toggle" onclick="toggleAi(this)">
+        <span>▼ Анализ ИИ</span>
+        <span class="ai-toggle-arrow">▾</span>
+      </div>
+      <div class="ai-block">
+        <div class="ai-rec ${recClass(rec)}">${recLabel(rec)}</div>
+        <div class="ai-rows">
+          <div class="ai-row">💸 Перепродажа: <b>${fmtPrice(ai.resale_price_min)} – ${fmtPrice(ai.resale_price_max)}</b></div>
+          <div class="ai-row">📈 Маржа: <b>~${ai.margin_percent || 0}%</b></div>
+          <div class="ai-row">${demandIcon(demand)} Спрос: <b>${demand}</b></div>
+        </div>
+        ${ai.reasoning ? `<div class="ai-reasoning">"${ai.reasoning}"</div>` : ""}
+      </div>`;
+
+    card.innerHTML = `
+      <div class="card-top">
+        ${imgHtml}
+        <div class="card-info">
+          <div class="card-rank"># ${deal.rank}</div>
+          <div class="card-name">${deal.name}</div>
+          <div class="price-row">
+            <span class="price-old">${fmtPrice(deal.old_price)}</span>
+            <span class="price-new">${fmtPrice(deal.new_price)}</span>
+            <span class="discount-badge">-${deal.discount_percent}%</span>
+          </div>
+          ${ratingHtml}
+        </div>
+      </div>
+      ${aiHtml}
+      <button class="btn-product" onclick="openLink('${deal.product_url}')">🔗 Смотреть товар</button>
+    `;
+    return card;
+  }
+
+  // ─── Рендер ───
+
+  function render(data) {
+    list.innerHTML = "";
+    updatedAt.textContent = "Обновлено: " + fmtDate(data.updated_at);
+
+    if (!data.deals || data.deals.length === 0) {
+      const msg = document.createElement("div");
+      msg.className = "state-msg";
+      msg.innerHTML = `<span class="icon">🤷</span>Сегодня акций со скидкой 50%+ не найдено`;
+      list.appendChild(msg);
+      return;
+    }
+
+    data.deals.forEach(deal => list.appendChild(buildCard(deal)));
+  }
+
+  function renderError() {
+    list.innerHTML = "";
+    const msg = document.createElement("div");
+    msg.className = "state-msg";
+    msg.innerHTML = `<span class="icon">🔌</span>Сервер недоступен. Попробуйте позже`;
+    list.appendChild(msg);
+    updatedAt.textContent = "Ошибка загрузки";
+  }
+
+  // ─── Аккордеон ───
+
+  function toggleAi(toggleEl) {
+    const block = toggleEl.nextElementSibling;
+    const arrow = toggleEl.querySelector(".ai-toggle-arrow");
+    const isOpen = block.classList.contains("open");
+    block.classList.toggle("open", !isOpen);
+    arrow.classList.toggle("open", !isOpen);
+    toggleEl.querySelector("span:first-child").textContent = isOpen ? "▼ Анализ ИИ" : "▲ Анализ ИИ";
+  }
+
+  // ─── Открыть ссылку ───
+
+  function openLink(url) {
+    if (tg) {
+      tg.openLink(url);
+    } else {
+      window.open(url, "_blank");
+    }
+  }
+
+  // ─── Загрузка данных ───
+
+  async function loadDeals() {
+    renderSkeleton();
+    btnRefresh.disabled = true;
+    try {
+      const res = await fetch("/api/deals");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      render(data);
+    } catch (e) {
+      console.error(e);
+      renderError();
+    } finally {
+      btnRefresh.disabled = false;
+    }
+  }
+
+  btnRefresh.addEventListener("click", loadDeals);
+
+  // Загружаем при старте
+  loadDeals();
+</script>
+</body>
+</html>
