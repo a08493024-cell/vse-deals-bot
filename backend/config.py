@@ -15,6 +15,13 @@ ALLOWED_USERS: set[int] = {
     int(uid.strip()) for uid in _raw_allowed.split(",") if uid.strip().isdigit()
 }
 
-# Прокси для локальной разработки (на сервере не нужен)
-# Примеры: socks5://127.0.0.1:1080  или  http://127.0.0.1:8080
+# Прокси для Telegram бота (нужен локально если Telegram заблокирован)
+# Пример: socks5://127.0.0.1:10808
 PROXY_URL: str = os.getenv("PROXY_URL", "")
+
+# Прокси для парсера vseinstrumenti.ru (локально пусто, на Railway при блокировке)
+PARSER_PROXY_URL: str = os.getenv("PARSER_PROXY_URL", "")
+
+# Ключ 2captcha для автоматического решения CAPTCHA
+# Получить: 2captcha.com (от $0.001 за решение)
+TWOCAPTCHA_API_KEY: str = os.getenv("TWOCAPTCHA_API_KEY", "")
