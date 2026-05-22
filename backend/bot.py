@@ -1,5 +1,6 @@
 """Telegram-бот на aiogram 3.x."""
 import asyncio
+import io
 import logging
 from datetime import datetime
 
@@ -7,6 +8,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import (
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -15,7 +17,7 @@ from aiogram.types import (
 
 from .config import ALLOWED_USERS, APP_URL, PROXY_URL, TELEGRAM_BOT_TOKEN
 from .parser import ParseError, fetch_deals
-from . import ai_analyzer
+from . import ai_analyzer, parser as _parser_module
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +187,85 @@ async def cmd_myid(message: Message) -> None:
         "Добавьте этот ID в переменную ALLOWED\\_USERS в .env через запятую.",
         parse_mode="Markdown",
     )
+
+
+# ─── Telegram CAPTCHA solver (бесплатный Вариант Б) ───
+
+# Future для ожидания ответа администратора
+_captcha_future: asyncio.Future | None = None
+_captcha_bot: Bot | None = None
+
+
+async def _telegram_captcha_callback(image_bytes: bytes) -> int | None:
+    """
+    Шлёт CAPTCHA-картинку первому администратору в белом списке,
+    ждёт ответа `/captcha <угол>` до 3 минут.
+    """
+    global _captcha_future, _captcha_bot
+
+    if not ALLOWED_USERS or not TELEGRAM_BOT_TOKEN:
+        return None
+
+    admin_id = next(iter(ALLOWED_USERS))
+    bot = _captcha_bot or _make_bot()
+
+    loop = asyncio.get_event_loop()
+    _captcha_future = loop.create_future()
+
+    try:
+        await bot.send_photo(
+            chat_id=admin_id,
+            photo=BufferedInputFile(image_bytes, filename="captcha.png"),
+            caption=(
+                "🔐 Требуется решить CAPTCHA!\n\n"
+                "Посмотри на картинку — на сколько градусов нужно повернуть её ПРОТИВ часовой стрелки "
+                "чтобы она стала горизонтальной?\n\n"
+                "Ответь: `/captcha <угол>` (например `/captcha 90`)"
+            ),
+        )
+        logger.info("CAPTCHA отправлена администратору %d", admin_id)
+        # Ждём ответа до 3 минут
+        angle = await asyncio.wait_for(_captcha_future, timeout=180)
+        return angle
+    except asyncio.TimeoutError:
+        logger.warning("Таймаут ожидания ответа на CAPTCHA")
+        return None
+    except Exception as e:
+        logger.warning("Ошибка отправки CAPTCHA в Telegram: %s", e)
+        return None
+    finally:
+        _captcha_future = None
+
+
+# Регистрируем callback в модуле парсера при импорте
+_parser_module._telegram_captcha_callback = _telegram_captcha_callback
+
+
+@router.message(Command("captcha"))
+async def cmd_captcha(message: Message) -> None:
+    """Получает угол решения CAPTCHA от администратора."""
+    global _captcha_future
+    if not _is_allowed(message):
+        return
+
+    parts = (message.text or "").strip().split()
+    if len(parts) < 2:
+        await message.answer("Использование: /captcha <угол от 0 до 360>")
+        return
+
+    try:
+        angle = int(parts[1])
+        if not 0 <= angle <= 360:
+            raise ValueError
+    except ValueError:
+        await message.answer("Угол должен быть числом от 0 до 360")
+        return
+
+    if _captcha_future and not _captcha_future.done():
+        _captcha_future.set_result(angle)
+        await message.answer(f"✅ Принято! Применяю угол {angle}°...")
+    else:
+        await message.answer("Сейчас нет ожидающей CAPTCHA.")
 
 
 def create_dispatcher() -> Dispatcher:

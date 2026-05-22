@@ -1,11 +1,19 @@
 """
 Парсинг акций с vseinstrumenti.ru.
-Использует Playwright для обхода servicepipe.ru anti-bot защиты.
-Rotation CAPTCHA решается через 2captcha API.
+Playwright + servicepipe.ru bypass.
+
+Приоритет решения CAPTCHA:
+  1. Сохранённые куки (session_state.json, < SESSION_MAX_AGE сек) — бесплатно
+  2. 2captcha API (TWOCAPTCHA_API_KEY) — платно
+  3. Telegram-бот: шлём картинку админу, ждём ответа с углом — бесплатно
+
+Для обновления куки вручную: python renew_session.py
 """
 import asyncio
 import base64
+import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -22,10 +30,16 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.vseinstrumenti.ru"
 SALES_URL = f"{BASE_URL}/sales/"
 
+SESSION_FILE = os.path.join(os.path.dirname(__file__), "..", "session_state.json")
+SESSION_MAX_AGE = 20 * 3600  # 20 часов
+
 BROWSER_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
 }
+
+# Callback для Telegram-решения CAPTCHA: set(_telegram_captcha_callback) из bot.py
+_telegram_captcha_callback: Optional[object] = None
 
 
 class ParseError(Exception):
@@ -44,26 +58,50 @@ class Product:
     image_url: str
 
 
+# ─── Сохранение / загрузка сессии ───
+
+def _load_session_state() -> Optional[dict]:
+    """Загружает сохранённые куки если они свежие."""
+    if not os.path.exists(SESSION_FILE):
+        return None
+    age = time.time() - os.path.getmtime(SESSION_FILE)
+    if age > SESSION_MAX_AGE:
+        logger.info("Сохранённая сессия устарела (%.0fч), нужно обновить", age / 3600)
+        return None
+    try:
+        with open(SESSION_FILE, encoding="utf-8") as f:
+            state = json.load(f)
+        logger.info("Загружена сохранённая сессия (возраст %.0fмин)", age / 60)
+        return state
+    except Exception as e:
+        logger.warning("Не удалось загрузить session_state.json: %s", e)
+        return None
+
+
+async def _save_session_state(context: BrowserContext) -> None:
+    """Сохраняет текущие куки для повторного использования."""
+    try:
+        state = await context.storage_state()
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        logger.info("Сессия сохранена в session_state.json")
+    except Exception as e:
+        logger.warning("Не удалось сохранить сессию: %s", e)
+
+
 # ─── 2captcha ───
 
 async def _solve_rotate_captcha(image_bytes: bytes) -> Optional[int]:
     """Отправляет изображение в 2captcha, возвращает угол поворота."""
     if not TWOCAPTCHA_API_KEY:
-        logger.warning("TWOCAPTCHA_API_KEY не задан — CAPTCHA не решается")
         return None
 
     img_b64 = base64.b64encode(image_bytes).decode()
 
     async with httpx.AsyncClient(timeout=120) as client:
-        # Шаг 1: отправить задачу
         r = await client.post(
             "https://2captcha.com/in.php",
-            data={
-                "key": TWOCAPTCHA_API_KEY,
-                "method": "rotatecaptcha",
-                "body": img_b64,
-                "json": 1,
-            },
+            data={"key": TWOCAPTCHA_API_KEY, "method": "rotatecaptcha", "body": img_b64, "json": 1},
         )
         resp = r.json()
         if resp.get("status") != 1:
@@ -73,7 +111,6 @@ async def _solve_rotate_captcha(image_bytes: bytes) -> Optional[int]:
         task_id = resp["request"]
         logger.info("2captcha: задача %s создана", task_id)
 
-        # Шаг 2: ждём решения (до 90 сек)
         for _ in range(18):
             await asyncio.sleep(5)
             r2 = await client.get(
@@ -89,8 +126,63 @@ async def _solve_rotate_captcha(image_bytes: bytes) -> Optional[int]:
                 logger.warning("2captcha ошибка: %s", resp2)
                 return None
 
-    logger.warning("2captcha: таймаут решения")
+    logger.warning("2captcha: таймаут")
     return None
+
+
+# ─── Telegram CAPTCHA (бесплатный вариант Б) ───
+
+async def _solve_via_telegram(image_bytes: bytes) -> Optional[int]:
+    """
+    Шлёт CAPTCHA-картинку администратору в Telegram, ждёт ответа с углом (0-360).
+    Работает только если _telegram_captcha_callback установлен из bot.py.
+    """
+    if _telegram_captcha_callback is None:
+        return None
+    try:
+        logger.info("Отправляем CAPTCHA в Telegram для ручного решения...")
+        angle = await _telegram_captcha_callback(image_bytes)
+        if angle is not None:
+            logger.info("Telegram-решение: угол %d°", angle)
+        return angle
+    except Exception as e:
+        logger.warning("Telegram CAPTCHA callback ошибка: %s", e)
+        return None
+
+
+# ─── Скачивание CAPTCHA-картинки ───
+
+async def _download_captcha_image(page: Page, context: BrowserContext) -> Optional[bytes]:
+    """Скачивает изображение CAPTCHA через куки текущей сессии."""
+    img_el = await page.query_selector(".captcha-img img")
+    if not img_el:
+        img_el = await page.query_selector("img[src*='get_image']")
+    if not img_el:
+        logger.error("Элемент CAPTCHA-изображения не найден")
+        return None
+
+    img_src = await img_el.get_attribute("src")
+    if not img_src:
+        return None
+
+    if not img_src.startswith("http"):
+        base = page.url.rsplit("/", 1)[0]
+        img_url = base + "/" + img_src.lstrip("./")
+    else:
+        img_url = img_src
+
+    logger.info("Загружаем CAPTCHA: %s", img_url)
+    cookies = await context.cookies()
+    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(img_url, headers={"Cookie": cookie_str}, timeout=15)
+        image_bytes = resp.content
+
+    if len(image_bytes) < 500:
+        logger.error("CAPTCHA-изображение слишком мало (%d байт)", len(image_bytes))
+        return None
+    return image_bytes
 
 
 # ─── Playwright — обход servicepipe ───
@@ -98,9 +190,9 @@ async def _solve_rotate_captcha(image_bytes: bytes) -> Optional[int]:
 async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     """
     Обнаруживает challenge servicepipe.ru и проходит его.
-    Возвращает True если страница прошла проверку.
+    Порядок: сохранённые куки (уже применены) → 2captcha → Telegram.
     """
-    # Безопасно читаем контент (страница может ещё navigating)
+    # Безопасно читаем контент
     content = ""
     for _ in range(5):
         try:
@@ -113,26 +205,22 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     if "servicepipe" not in content and "spsn" not in content:
         return True
 
-    logger.info("servicepipe.ru challenge обнаружен, ждём JS-redirect на /xpvnsulc/...")
+    logger.info("servicepipe.ru: ждём JS-redirect на /xpvnsulc/...")
 
-    # JS-challenge запускается в фоне и редиректит на /xpvnsulc/ для верификации
     try:
         await page.wait_for_url(re.compile(r"/xpvnsulc/"), timeout=30000)
-        logger.info("JS-challenge прошёл, URL: %s", page.url[:80])
+        logger.info("JS-challenge прошёл: %s", page.url[:80])
     except Exception as e:
         logger.warning("wait_for_url(/xpvnsulc/) timeout: %s", e)
         if "vseinstrumenti.ru/sales" in page.url:
             return True
-        logger.error("Challenge не прошёл, URL: %s", page.url)
         return False
 
-    # Ждём загрузки страницы верификации
     try:
         await page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:
         pass
 
-    # Читаем контент страницы верификации
     content = ""
     for _ in range(3):
         try:
@@ -141,61 +229,44 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
         except Exception:
             await asyncio.sleep(1)
 
-    # Нет CAPTCHA — ждём авто-редиректа на sales
+    # Нет CAPTCHA — авто-редирект
     if "sp_rotated_captcha" not in content and "rndcaptcha" not in content:
-        logger.info("CAPTCHA не нужна, ожидаем редирект на sales...")
+        logger.info("CAPTCHA нет, ждём редирект на sales...")
         try:
             await page.wait_for_url(
-                re.compile(r"vseinstrumenti\.ru/(?!xpvnsulc)"),
-                timeout=15000,
+                re.compile(r"vseinstrumenti\.ru/(?!xpvnsulc)"), timeout=15000
             )
-            logger.info("Авто-редирект: %s", page.url)
+            await _save_session_state(context)
             return True
         except Exception:
             if "xpvnsulc" not in page.url:
+                await _save_session_state(context)
                 return True
-            logger.warning("Редирект не произошёл, URL: %s", page.url)
             return False
 
     logger.info("Ротационная CAPTCHA обнаружена")
 
-    if not TWOCAPTCHA_API_KEY:
-        logger.error("TWOCAPTCHA_API_KEY не задан — решение CAPTCHA невозможно")
+    # Скачиваем картинку
+    image_bytes = await _download_captcha_image(page, context)
+    if image_bytes is None:
         return False
 
-    # Скачиваем изображение CAPTCHA
-    img_el = await page.query_selector(".captcha-img img")
-    if not img_el:
-        img_el = await page.query_selector("img[src*='get_image']")
-    if not img_el:
-        logger.error("Элемент CAPTCHA-изображения не найден")
-        return False
+    # Приоритет 1: 2captcha
+    angle: Optional[int] = await _solve_rotate_captcha(image_bytes)
 
-    img_src = await img_el.get_attribute("src")
-    if not img_src.startswith("http"):
-        base = page.url.rsplit("/", 1)[0]
-        img_url = base + "/" + img_src.lstrip("./")
-    else:
-        img_url = img_src
-
-    logger.info("Загружаем CAPTCHA-изображение: %s", img_url)
-    cookies = await context.cookies()
-    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-
-    async with httpx.AsyncClient() as client:
-        img_resp = await client.get(img_url, headers={"Cookie": cookie_str}, timeout=15)
-        image_bytes = img_resp.content
-
-    if len(image_bytes) < 500:
-        logger.error("CAPTCHA-изображение слишком мало (%d байт)", len(image_bytes))
-        return False
-
-    # Решаем через 2captcha
-    angle = await _solve_rotate_captcha(image_bytes)
+    # Приоритет 2: Telegram (бесплатно)
     if angle is None:
+        angle = await _solve_via_telegram(image_bytes)
+
+    if angle is None:
+        logger.error(
+            "Нет способа решить CAPTCHA. "
+            "Запустите `python renew_session.py` для ручного обновления сессии, "
+            "или задайте TWOCAPTCHA_API_KEY."
+        )
         return False
 
-    # Двигаем слайдер на нужный угол (track 275px, angle 0-360 → x 0-275)
+    # Двигаем слайдер
     control_el = await page.query_selector(".captcha-control")
     button_el = await page.query_selector(".captcha-control-button")
     if not (control_el and button_el):
@@ -205,7 +276,6 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     ctrl_box = await control_el.bounding_box()
     btn_box = await button_el.bounding_box()
     if not (ctrl_box and btn_box):
-        logger.error("bounding_box слайдера недоступен")
         return False
 
     ctrl_left = ctrl_box["x"]
@@ -221,20 +291,20 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     await page.mouse.up()
     await asyncio.sleep(1.5)
 
-    # Ждём редиректа после решения CAPTCHA
+    # Ждём редиректа
     try:
         await page.wait_for_url(
-            re.compile(r"vseinstrumenti\.ru/(?!xpvnsulc)"),
-            timeout=20000,
+            re.compile(r"vseinstrumenti\.ru/(?!xpvnsulc)"), timeout=20000
         )
-        logger.info("CAPTCHA решена, переход на: %s", page.url)
+        logger.info("CAPTCHA решена: %s", page.url)
+        await _save_session_state(context)
         return True
     except Exception:
         await asyncio.sleep(2)
         if "xpvnsulc" not in page.url:
-            logger.info("CAPTCHA решена (URL check): %s", page.url)
+            await _save_session_state(context)
             return True
-        logger.warning("Редирект после CAPTCHA не произошёл, URL: %s", page.url)
+        logger.warning("Редирект после CAPTCHA не произошёл: %s", page.url)
         return False
 
 
@@ -246,18 +316,15 @@ async def _fetch_page_playwright(page: Page, context: BrowserContext, page_num: 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-            # Проверяем и обходим challenge если нужно (ждёт редиректа внутри)
             if not await _handle_servicepipe(page, context):
                 raise Exception("Не удалось пройти CAPTCHA")
 
-            # Ждём загрузки продуктов (React/Next.js рендеринг)
             try:
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
             await asyncio.sleep(2)
 
-            # Пробуем прокрутить для lazy-load контента
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
             await asyncio.sleep(1)
 
@@ -399,6 +466,9 @@ async def fetch_deals() -> list[dict]:
     if PARSER_PROXY_URL:
         proxy_cfg = {"server": PARSER_PROXY_URL}
 
+    # Пробуем загрузить сохранённую сессию
+    saved_state = _load_session_state()
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -409,12 +479,17 @@ async def fetch_deals() -> list[dict]:
                 "--disable-dev-shm-usage",
             ],
         )
-        context = await browser.new_context(
+
+        # Если есть свежие куки — используем их (CAPTCHA не нужна)
+        context_kwargs = dict(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             locale="ru-RU",
             extra_http_headers=BROWSER_HEADERS,
         )
-        # Скрываем следы автоматизации
+        if saved_state:
+            context_kwargs["storage_state"] = saved_state
+
+        context = await browser.new_context(**context_kwargs)
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});

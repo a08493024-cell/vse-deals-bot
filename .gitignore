@@ -8,3 +8,14 @@ venv/
 dist/
 build/
 .DS_Store
+session_state.json
+*.html
+*.png
+captcha_*.png
+captcha_*.html
+debug_*.py
+bootstrap_install.py
+test_parser.py
+bundle.js
+captchaIntGen.js
+uvicorn.log
