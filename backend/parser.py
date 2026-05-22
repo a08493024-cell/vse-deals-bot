@@ -97,42 +97,54 @@ async def _solve_rotate_captcha_gemini(image_bytes: bytes) -> Optional[int]:
     """
     Отправляет CAPTCHA-картинку в Gemini Vision и получает угол поворота.
     Использует уже настроенный GEMINI_API_KEY — полностью бесплатно.
+    Делает до 3 попыток с паузой при 429 rate-limit.
     """
     if not GEMINI_API_KEY:
         return None
 
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+    genai.configure(api_key=GEMINI_API_KEY)
 
-        img_b64 = base64.b64encode(image_bytes).decode()
-        image_part = {"mime_type": "image/png", "data": img_b64}
+    # Пробуем несколько моделей (у разных может быть разная квота)
+    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    img_b64 = base64.b64encode(image_bytes).decode()
+    image_part = {"mime_type": "image/png", "data": img_b64}
+    prompt = (
+        "This image shows an object that has been rotated from its natural horizontal position. "
+        "How many degrees CLOCKWISE must it be rotated to appear horizontal and upright? "
+        "Reply with ONLY a number 0-360."
+    )
 
-        prompt = (
-            "На этом изображении объект повёрнут относительно своего "
-            "естественного горизонтального положения. "
-            "На сколько градусов по часовой стрелке нужно повернуть изображение, "
-            "чтобы объект стал горизонтальным? "
-            "Ответь ТОЛЬКО числом от 0 до 360, без пояснений."
-        )
-
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: model.generate_content([image_part, prompt]),
-        )
-
-        text = (response.text or "").strip()
-        m = re.search(r"\d+", text)
-        if m:
-            angle = int(m.group())
-            angle = max(0, min(360, angle))
-            logger.info("Gemini решил CAPTCHA: угол %d°", angle)
-            return angle
-
-        logger.warning("Gemini не вернул число: %r", text)
-    except Exception as e:
-        logger.warning("Gemini CAPTCHA solver ошибка: %s", e)
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                model = genai.GenerativeModel(model_name)
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None, lambda m=model: m.generate_content([image_part, prompt])
+                )
+                text = (response.text or "").strip()
+                m_match = re.search(r"\d+", text)
+                if m_match:
+                    angle = max(0, min(360, int(m_match.group())))
+                    logger.info("Gemini (%s) решил CAPTCHA: угол %d°", model_name, angle)
+                    return angle
+                logger.warning("Gemini (%s) не вернул число: %r", model_name, text)
+                break
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                    # Ждём рекомендованную задержку или 15 секунд
+                    import re as _re
+                    delay_m = _re.search(r"retry.*?(\d+)\s*s", err, _re.I)
+                    delay = int(delay_m.group(1)) + 2 if delay_m else 15
+                    if attempt < 2:
+                        logger.info("Gemini rate limit, ждём %ds...", delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.warning("Gemini (%s) rate limit после 3 попыток", model_name)
+                else:
+                    logger.warning("Gemini (%s) ошибка: %s", model_name, err[:100])
+                break
 
     return None
 
