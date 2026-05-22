@@ -23,7 +23,9 @@ import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Page, BrowserContext
 
-from .config import TWOCAPTCHA_API_KEY, PARSER_PROXY_URL
+import google.generativeai as genai
+
+from .config import TWOCAPTCHA_API_KEY, PARSER_PROXY_URL, GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,52 @@ async def _save_session_state(context: BrowserContext) -> None:
         logger.info("Сессия сохранена в session_state.json")
     except Exception as e:
         logger.warning("Не удалось сохранить сессию: %s", e)
+
+
+# ─── Gemini Vision CAPTCHA solver (бесплатно) ───
+
+async def _solve_rotate_captcha_gemini(image_bytes: bytes) -> Optional[int]:
+    """
+    Отправляет CAPTCHA-картинку в Gemini Vision и получает угол поворота.
+    Использует уже настроенный GEMINI_API_KEY — полностью бесплатно.
+    """
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+
+        img_b64 = base64.b64encode(image_bytes).decode()
+        image_part = {"mime_type": "image/png", "data": img_b64}
+
+        prompt = (
+            "На этом изображении объект повёрнут относительно своего "
+            "естественного горизонтального положения. "
+            "На сколько градусов по часовой стрелке нужно повернуть изображение, "
+            "чтобы объект стал горизонтальным? "
+            "Ответь ТОЛЬКО числом от 0 до 360, без пояснений."
+        )
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: model.generate_content([image_part, prompt]),
+        )
+
+        text = (response.text or "").strip()
+        m = re.search(r"\d+", text)
+        if m:
+            angle = int(m.group())
+            angle = max(0, min(360, angle))
+            logger.info("Gemini решил CAPTCHA: угол %d°", angle)
+            return angle
+
+        logger.warning("Gemini не вернул число: %r", text)
+    except Exception as e:
+        logger.warning("Gemini CAPTCHA solver ошибка: %s", e)
+
+    return None
 
 
 # ─── 2captcha ───
@@ -251,18 +299,21 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     if image_bytes is None:
         return False
 
-    # Приоритет 1: 2captcha
-    angle: Optional[int] = await _solve_rotate_captcha(image_bytes)
+    # Приоритет 1: Gemini Vision (бесплатно, уже настроен)
+    angle: Optional[int] = await _solve_rotate_captcha_gemini(image_bytes)
 
-    # Приоритет 2: Telegram (бесплатно)
+    # Приоритет 2: 2captcha (если задан ключ)
+    if angle is None:
+        angle = await _solve_rotate_captcha(image_bytes)
+
+    # Приоритет 3: Telegram — шлём картинку администратору
     if angle is None:
         angle = await _solve_via_telegram(image_bytes)
 
     if angle is None:
         logger.error(
             "Нет способа решить CAPTCHA. "
-            "Запустите `python renew_session.py` для ручного обновления сессии, "
-            "или задайте TWOCAPTCHA_API_KEY."
+            "Задайте GEMINI_API_KEY или TWOCAPTCHA_API_KEY."
         )
         return False
 
