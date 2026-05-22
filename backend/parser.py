@@ -100,45 +100,85 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     Обнаруживает challenge servicepipe.ru и проходит его.
     Возвращает True если страница прошла проверку.
     """
-    content = await page.content()
+    # Безопасно читаем контент (страница может ещё navigating)
+    content = ""
+    for _ in range(5):
+        try:
+            content = await page.content()
+            break
+        except Exception:
+            await asyncio.sleep(1)
 
-    # Нет challenge — возвращаем True
+    # Нет challenge — уже на целевой странице
     if "servicepipe" not in content and "spsn" not in content:
         return True
 
-    logger.info("Обнаружена защита servicepipe.ru, обрабатываем...")
+    logger.info("servicepipe.ru challenge обнаружен, ждём JS-redirect на /xpvnsulc/...")
 
-    # Ждём JS-challenge (первый этап — автоматически)
+    # JS-challenge запускается в фоне и редиректит на /xpvnsulc/ для верификации
     try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_url(re.compile(r"/xpvnsulc/"), timeout=30000)
+        logger.info("JS-challenge прошёл, URL: %s", page.url[:80])
+    except Exception as e:
+        logger.warning("wait_for_url(/xpvnsulc/) timeout: %s", e)
+        if "vseinstrumenti.ru/sales" in page.url:
+            return True
+        logger.error("Challenge не прошёл, URL: %s", page.url)
+        return False
+
+    # Ждём загрузки страницы верификации
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:
         pass
 
-    # Проверяем: есть ли ротационная CAPTCHA
-    content = await page.content()
+    # Читаем контент страницы верификации
+    content = ""
+    for _ in range(3):
+        try:
+            content = await page.content()
+            break
+        except Exception:
+            await asyncio.sleep(1)
+
+    # Нет CAPTCHA — ждём авто-редиректа на sales
     if "sp_rotated_captcha" not in content and "rndcaptcha" not in content:
-        # JS-challenge прошёл автоматически
-        logger.info("JS-challenge пройден автоматически")
-        return True
+        logger.info("CAPTCHA не нужна, ожидаем редирект на sales...")
+        try:
+            await page.wait_for_url(
+                re.compile(r"vseinstrumenti\.ru/(?!xpvnsulc)"),
+                timeout=15000,
+            )
+            logger.info("Авто-редирект: %s", page.url)
+            return True
+        except Exception:
+            if "xpvnsulc" not in page.url:
+                return True
+            logger.warning("Редирект не произошёл, URL: %s", page.url)
+            return False
 
     logger.info("Ротационная CAPTCHA обнаружена")
 
     if not TWOCAPTCHA_API_KEY:
-        logger.error("TWOCAPTCHA_API_KEY не задан — невозможно решить CAPTCHA")
+        logger.error("TWOCAPTCHA_API_KEY не задан — решение CAPTCHA невозможно")
         return False
 
     # Скачиваем изображение CAPTCHA
-    img_el = await page.query_selector("img[src*='get_image'], img[src*='make_image']")
+    img_el = await page.query_selector(".captcha-img img")
     if not img_el:
-        img_el = await page.query_selector(".captcha-img img")
+        img_el = await page.query_selector("img[src*='get_image']")
     if not img_el:
-        logger.error("Не нашли элемент CAPTCHA-изображения")
+        logger.error("Элемент CAPTCHA-изображения не найден")
         return False
 
     img_src = await img_el.get_attribute("src")
-    img_url = img_src if img_src.startswith("http") else page.url.rsplit("/", 1)[0] + "/" + img_src.lstrip("./")
+    if not img_src.startswith("http"):
+        base = page.url.rsplit("/", 1)[0]
+        img_url = base + "/" + img_src.lstrip("./")
+    else:
+        img_url = img_src
 
-    # Загружаем изображение через cookies текущей сессии
+    logger.info("Загружаем CAPTCHA-изображение: %s", img_url)
     cookies = await context.cookies()
     cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
 
@@ -146,7 +186,7 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
         img_resp = await client.get(img_url, headers={"Cookie": cookie_str}, timeout=15)
         image_bytes = img_resp.content
 
-    if len(image_bytes) < 1000:
+    if len(image_bytes) < 500:
         logger.error("CAPTCHA-изображение слишком мало (%d байт)", len(image_bytes))
         return False
 
@@ -155,38 +195,46 @@ async def _handle_servicepipe(page: Page, context: BrowserContext) -> bool:
     if angle is None:
         return False
 
-    # Двигаем слайдер на нужный угол
-    slider = await page.query_selector(".captcha-control-button, .captcha-control")
-    if slider:
-        box = await slider.bounding_box()
-        if box:
-            control_wrap = await page.query_selector(".captcha-control")
-            ctrl_box = await control_wrap.bounding_box() if control_wrap else None
-            ctrl_width = ctrl_box["width"] if ctrl_box else 275
+    # Двигаем слайдер на нужный угол (track 275px, angle 0-360 → x 0-275)
+    control_el = await page.query_selector(".captcha-control")
+    button_el = await page.query_selector(".captcha-control-button")
+    if not (control_el and button_el):
+        logger.error("Слайдер CAPTCHA не найден")
+        return False
 
-            # Нормализуем угол 0-360 в позицию слайдера 0-1
-            ratio = angle / 360.0
-            target_x = box["x"] + ratio * ctrl_width
-            target_y = box["y"] + box["height"] / 2
+    ctrl_box = await control_el.bounding_box()
+    btn_box = await button_el.bounding_box()
+    if not (ctrl_box and btn_box):
+        logger.error("bounding_box слайдера недоступен")
+        return False
 
-            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-            await page.mouse.down()
-            await page.mouse.move(target_x, target_y, steps=20)
-            await page.mouse.up()
-            await asyncio.sleep(1)
+    ctrl_left = ctrl_box["x"]
+    ctrl_width = ctrl_box["width"] or 275
+    ratio = angle / 360.0
+    target_x = ctrl_left + ratio * ctrl_width
+    slider_y = btn_box["y"] + btn_box["height"] / 2
+    start_x = btn_box["x"] + btn_box["width"] / 2
 
-    # Ждём редиректа после решения
+    await page.mouse.move(start_x, slider_y)
+    await page.mouse.down()
+    await page.mouse.move(target_x, slider_y, steps=25)
+    await page.mouse.up()
+    await asyncio.sleep(1.5)
+
+    # Ждём редиректа после решения CAPTCHA
     try:
-        await page.wait_for_url(SALES_URL + "*", timeout=15000)
-        logger.info("CAPTCHA решена, переход на целевую страницу")
+        await page.wait_for_url(
+            re.compile(r"vseinstrumenti\.ru/(?!xpvnsulc)"),
+            timeout=20000,
+        )
+        logger.info("CAPTCHA решена, переход на: %s", page.url)
         return True
     except Exception:
-        # Пробуем ещё раз проверить страницу
         await asyncio.sleep(2)
-        url = page.url
-        if "vseinstrumenti.ru/sales" in url:
+        if "xpvnsulc" not in page.url:
+            logger.info("CAPTCHA решена (URL check): %s", page.url)
             return True
-        logger.warning("Редирект после CAPTCHA не состоялся, URL: %s", url)
+        logger.warning("Редирект после CAPTCHA не произошёл, URL: %s", page.url)
         return False
 
 
@@ -196,14 +244,23 @@ async def _fetch_page_playwright(page: Page, context: BrowserContext, page_num: 
 
     for attempt in range(1, 4):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-            # Проверяем и обходим challenge если нужно
+            # Проверяем и обходим challenge если нужно (ждёт редиректа внутри)
             if not await _handle_servicepipe(page, context):
                 raise Exception("Не удалось пройти CAPTCHA")
 
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            # Ждём загрузки продуктов (React/Next.js рендеринг)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            # Пробуем прокрутить для lazy-load контента
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+            await asyncio.sleep(1)
+
             return await page.content()
 
         except Exception as exc:
