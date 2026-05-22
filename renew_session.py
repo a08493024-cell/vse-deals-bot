@@ -23,7 +23,8 @@ SESSION_FILE = os.path.normpath(
 
 SALES_URL = "https://www.vseinstrumenti.ru/sales/"
 
-PROXY_URL = os.getenv("PROXY_URL", "")
+# Для браузера НЕ используем Telegram-прокси (PROXY_URL), только PARSER_PROXY_URL
+PROXY_URL = os.getenv("PARSER_PROXY_URL", "")
 
 
 async def main() -> None:
@@ -33,7 +34,7 @@ async def main() -> None:
     print()
     print("Открывается браузер Chrome...")
     print("Реши CAPTCHA вручную:")
-    print("  → перетащи слайдер так, чтобы картинка стала горизонтальной")
+    print("  -> перетащи слайдер так, чтобы картинка стала горизонтальной")
     print()
     print("После успешного решения браузер закроется автоматически.")
     print()
@@ -68,10 +69,11 @@ async def main() -> None:
         page = await context.new_page()
         await page.goto(SALES_URL, wait_until="domcontentloaded", timeout=30000)
 
-        print("Ожидание решения CAPTCHA (до 3 минут)...")
+        print("Ожидание решения CAPTCHA (до 10 минут)...")
+        print("ВАЖНО: найди окно Chrome на панели задач и реши CAPTCHA там!")
 
         # Ждём пока пользователь решит CAPTCHA и попадёт на /sales/
-        deadline = asyncio.get_event_loop().time() + 180
+        deadline = asyncio.get_event_loop().time() + 600
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(1)
             url = page.url
@@ -87,7 +89,7 @@ async def main() -> None:
                     print(f"Сессия получена! URL: {url[:60]}")
                     break
         else:
-            print("Таймаут 3 минуты — браузер закрывается без сохранения.")
+            print("Таймаут 10 минут — браузер закрывается без сохранения.")
             await browser.close()
             return
 
